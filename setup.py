@@ -8,12 +8,11 @@ except ImportError:  # for pip <= 9.0.3
 
 
 # parse_requirements() returns generator of pip.req.InstallRequirement objects
-install_reqs = parse_requirements('requirements.txt', session='null')
-
+install_reqs = list(parse_requirements('requirements.txt', session='null'))
 
 # reqs is a list of requirement
 # e.g. ['django==1.5.1', 'mezzanine==1.4.6']
-reqs = [str(ir.req) for ir in install_reqs]
+reqs = [str(ir.requirement) for ir in install_reqs]
 
 
 with open('README.md') as f:
@@ -25,7 +24,7 @@ setup(name='onnx2keras',
       description='The deep learning models convertor',
       long_description=long_description,
       long_description_content_type='text/markdown',
-      url='https://github.com/v-levochko/onnx2keras',
+      url='https://github.com/nerox8664/onnx2keras',
       author='Grigory Malivenko',
       author_email='nerox8664@gmail.com',
       classifiers=[
