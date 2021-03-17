@@ -3,12 +3,13 @@ import logging
 from .utils import ensure_tf_type, ensure_numpy_type
 
 
-def convert_conv(node, params, layers, node_name, keras_name):
+def convert_conv(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert convolution layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -32,13 +33,7 @@ def convert_conv(node, params, layers, node_name, keras_name):
         raise NotImplementedError('Not implemented')
 
     input_0 = ensure_tf_type(layers[node.input[0]], name="%s_const" % keras_name)
-    #input 0 (name input_1).
-    #input 1 (name W74).
-    #input 0: Tensor("input_1:0", shape=(None, 3, 0, 0), dtype=float32)
-    # but it should be [None, None, 3]
     n_groups = params['group'] if 'group' in params else 1
-    print('n_groups')
-    print(n_groups)
     dilation = params['dilations'][0] if 'dilations' in params else 1
     pads = params['pads'] if 'pads' in params else [0, 0, 0]
     strides = params['strides'] if 'strides' in params else [1, 1, 1]
@@ -54,34 +49,31 @@ def convert_conv(node, params, layers, node_name, keras_name):
             )
             layers[padding_name] = input_0 = padding_layer(input_0)
         out_channels, channels_per_group, dimension, height, width = W.shape
-        W = W.transpose(2, 3, 4, 1, 0) 
-        in_channels = channels_per_group * n_groups
+        W = W.transpose(2, 3, 4, 1, 0)
 
-        if n_groups != 1:
-            raise NotImplementedError("Not Implemented")
+        if has_bias:
+            weights = [W, bias]
         else:
-            if has_bias:
-                weights = [W, bias]
-            else:
-                weights = [W]
+            weights = [W]
 
-            conv = keras.layers.Conv3D(
-                filters=out_channels,
-                kernel_size=(dimension, height, width),
-                strides=(strides[0], strides[1], strides[2]),
-                padding='valid',
-                weights=weights,
-                use_bias=has_bias,
-                activation=None,
-                dilation_rate=dilation,
-                bias_initializer='zeros', kernel_initializer='zeros',
-                name=keras_name
-            )
-            layers[node_name] = conv(input_0)
+        conv = keras.layers.Conv3D(
+            filters=out_channels,
+            kernel_size=(dimension, height, width),
+            strides=(strides[0], strides[1], strides[2]),
+            padding='valid',
+            weights=weights,
+            use_bias=has_bias,
+            activation=None,
+            dilation_rate=dilation,
+            bias_initializer='zeros', kernel_initializer='zeros',
+            name=keras_name,
+            groups=n_groups
+        )
+        layers[node_name] = conv(input_0)
 
     elif len(W.shape) == 4:  # 2D conv
         logger.debug('2D convolution')
-        
+
         padding = None
         if len(pads) == 2 and (pads[0] > 0 or pads[1] > 0):
             padding = (pads[0], pads[1])
@@ -93,13 +85,13 @@ def convert_conv(node, params, layers, node_name, keras_name):
             padding_name = keras_name + '_pad'
             padding_layer = keras.layers.ZeroPadding2D(
                 padding=padding,
-                name=padding_name
+                name=padding_name,
+                data_format='channels_first'
             )
             layers[padding_name] = input_0 = padding_layer(input_0)
 
         W = W.transpose(2, 3, 1, 0)
         height, width, channels_per_group, out_channels = W.shape
-        #3,3,3,32
         in_channels = channels_per_group * n_groups
 
         if n_groups == in_channels and n_groups != 1:
@@ -130,19 +122,34 @@ def convert_conv(node, params, layers, node_name, keras_name):
             # Example from https://kratzert.github.io/2017/02/24/finetuning-alexnet-with-tensorflow.html
             def target_layer(x, groups=n_groups, stride_y=strides[0], stride_x=strides[1]):
                 import tensorflow as tf
-                x = tf.transpose(x, [0, 2, 3, 1])
+                from tensorflow.keras import backend as K
+                data_format = 'NCHW' if K.image_data_format() == 'channels_first' else 'NHWC'
+
+                if data_format == 'NCHW':
+                    x = tf.transpose(x, [0, 2, 3, 1])
+
+                def convolve_lambda_biased(i, k, b):
+                    import tensorflow as tf
+                    conv = tf.nn.conv2d(i, k, strides=[1, stride_y, stride_x, 1], dilations=[1, dilation, dilation, 1], padding='VALID', data_format='NHWC')
+                    return tf.nn.bias_add(conv, b,  data_format='NHWC')
 
                 def convolve_lambda(i, k):
                     import tensorflow as tf
-                    return tf.nn.conv2d(i, k, strides=[1, stride_y, stride_x, 1], padding='VALID')
+                    return tf.nn.conv2d(i, k, strides=[1, stride_y, stride_x, 1], dilations=[1, dilation, dilation, 1], padding='VALID', data_format='NHWC')
 
                 input_groups = tf.split(axis=3, num_or_size_splits=groups, value=x)
-                weight_groups = tf.split(axis=3, num_or_size_splits=groups, value=W.transpose(0, 1, 2, 3))
-                output_groups = [convolve_lambda(i, k) for i, k in zip(input_groups, weight_groups)]
+                weight_groups = tf.split(axis=3, num_or_size_splits=groups, value=W)
+                if has_bias:
+                    bias_groups = tf.split(axis=0, num_or_size_splits=groups, value=bias)
+                    output_groups = [convolve_lambda_biased(i, k, b) for i, k, b in
+                                     zip(input_groups, weight_groups, bias_groups)]
+                else:
+                    output_groups = [convolve_lambda(i, k) for i, k in zip(input_groups, weight_groups)]
 
                 layer = tf.concat(axis=3, values=output_groups)
+                if data_format == 'NCHW':
+                    layer = tf.transpose(layer, [0, 3, 1, 2])
 
-                layer = tf.transpose(layer, [0, 3, 1, 2])
                 return layer
 
             lambda_layer = keras.layers.Lambda(target_layer)
@@ -153,12 +160,7 @@ def convert_conv(node, params, layers, node_name, keras_name):
                 weights = [W, bias]
             else:
                 weights = [W]
-            print(out_channels)#32
-            print((height, width))#(3,3)
-            print((strides[0], strides[1]))#(1,1)
-            print(has_bias)#false
-            print(dilation)#1
-            print(keras_name)#convolut
+
             conv = keras.layers.Conv2D(
                 filters=out_channels,
                 kernel_size=(height, width),
@@ -171,11 +173,9 @@ def convert_conv(node, params, layers, node_name, keras_name):
                 bias_initializer='zeros', kernel_initializer='zeros',
                 name=keras_name
             )
-            #using functional model
-            #input 0: Tensor("input_1:0", shape=(None, 3, 0, 0), dtype=float32)
-            layers[node_name] = conv(input_0)
 
-    else: 
+            layers[node_name] = conv(input_0)
+    else:
         # 1D conv
         W = W.transpose(2, 1, 0)
         width, channels, n_filters = W.shape
@@ -194,6 +194,7 @@ def convert_conv(node, params, layers, node_name, keras_name):
             return tf.transpose(x, [0, 2, 1])
 
         lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
+        lambda_layer[keras_name] = target_layer
         layers[node_name] = lambda_layer(input_0)
 
         # padding_name = keras_name + '_pad'
@@ -220,12 +221,13 @@ def convert_conv(node, params, layers, node_name, keras_name):
         # layers[node_name] = conv(input_0)
 
 
-def convert_convtranspose(node, params, layers, node_name, keras_name):
+def convert_convtranspose(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert transposed convolution layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None

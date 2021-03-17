@@ -11,12 +11,13 @@ except ImportError:
     from collections import Iterable
 
 
-def convert_clip(node, params, layers, node_name, keras_name):
+def convert_clip(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert clip layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -35,16 +36,18 @@ def convert_clip(node, params, layers, node_name, keras_name):
             import tensorflow as tf
             return tf.clip_by_value(x, vmin, vmax)
         layer = keras.layers.Lambda(target_layer, name=keras_name)
+        lambda_func[keras_name] = target_layer
 
     layers[node_name] = layer(input_0)
 
 
-def convert_log(node, params, layers, node_name, keras_name):
+def convert_log(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Log layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -60,14 +63,16 @@ def convert_log(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_exp(node, params, layers, node_name, keras_name):
+def convert_exp(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Exp layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: resulting layer name
     :return: None
     """
@@ -82,14 +87,16 @@ def convert_exp(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_reduce_sum(node, params, layers, node_name, keras_name):
+def convert_reduce_sum(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert reduce sum.
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -108,14 +115,16 @@ def convert_reduce_sum(node, params, layers, node_name, keras_name):
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
     layers[node_name].set_shape(layers[node_name].shape)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_reduce_mean(node, params, layers, node_name, keras_name):
+def convert_reduce_mean(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert reduce mean.
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -132,14 +141,42 @@ def convert_reduce_mean(node, params, layers, node_name, keras_name):
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
     layers[node_name].set_shape(layers[node_name].shape)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_pow(node, params, layers, node_name, keras_name):
+def convert_reduce_max(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
+    """
+    Convert reduce max.
+    :param node: current operation node
+    :param params: operation attributes
+    :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
+    :param node_name: internal converter name
+    :param keras_name: resulting layer name
+    :return: None
+    """
+    if len(node.input) != 1:
+        assert AttributeError('More than 1 input for reduce max layer.')
+
+    input_0 = ensure_tf_type(layers[node.input[0]], name="%s_const" % keras_name)
+
+    def target_layer(x, axis=params['axes'], keepdims=params['keepdims']):
+        import tensorflow.keras.backend as K
+        return K.max(x, keepdims=(keepdims == 1), axis=axis)
+
+    lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
+    layers[node_name] = lambda_layer(input_0)
+    layers[node_name].set_shape(layers[node_name].shape)
+    lambda_func[keras_name] = target_layer
+
+
+def convert_pow(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Pow layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -156,14 +193,16 @@ def convert_pow(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_sqrt(node, params, layers, node_name, keras_name):
+def convert_sqrt(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Sqrt layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -179,14 +218,16 @@ def convert_sqrt(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_split(node, params, layers, node_name, keras_names):
+def convert_split(node, params, layers, lambda_func, custom_objects, node_name, keras_names):
     """
     Convert Split layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -213,15 +254,17 @@ def convert_split(node, params, layers, node_name, keras_names):
 
         lambda_layer = keras.layers.Lambda(target_layer, name=keras_names[i])
         layers[node_name] = lambda_layer(input_0)
+        lambda_func[keras_names[i]] = target_layer
         cur += split
 
 
-def convert_cast(node, params, layers, node_name, keras_name):
+def convert_cast(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Cast layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -246,7 +289,7 @@ def convert_cast(node, params, layers, node_name, keras_name):
             11: np.double,
         }
 
-        layers[node_name] = cast_map[params['to']](node.input[0])
+        layers[node_name] = cast_map[params['to']](layers[node.input[0]])
     else:
         input_0 = ensure_tf_type(layers[node.input[0]], name="%s_const" % keras_name)
 
@@ -267,14 +310,16 @@ def convert_cast(node, params, layers, node_name, keras_name):
 
         lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
         layers[node_name] = lambda_layer(input_0)
+        lambda_func[keras_name] = target_layer
 
 
-def convert_floor(node, params, layers, node_name, keras_name):
+def convert_floor(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Floor layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -291,14 +336,16 @@ def convert_floor(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_identity(node, params, layers, node_name, keras_name):
+def convert_identity(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert Identity layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -309,12 +356,13 @@ def convert_identity(node, params, layers, node_name, keras_name):
     layers[node_name] = layers[node.input[0]]
 
 
-def convert_argmax(node, params, layers, node_name, keras_name):
+def convert_argmax(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert ArgMax layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -331,14 +379,16 @@ def convert_argmax(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer
 
 
-def convert_reduce_l2(node, params, layers, node_name, keras_name):
+def convert_reduce_l2(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert ReduceL2 layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -355,3 +405,4 @@ def convert_reduce_l2(node, params, layers, node_name, keras_name):
 
     lambda_layer = keras.layers.Lambda(target_layer, name=keras_name)
     layers[node_name] = lambda_layer(input_0)
+    lambda_func[keras_name] = target_layer

@@ -3,12 +3,13 @@ import logging
 from .utils import ensure_tf_type
 
 
-def convert_maxpool(node, params, layers, node_name, keras_name):
+def convert_maxpool(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert MaxPooling layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -21,8 +22,6 @@ def convert_maxpool(node, params, layers, node_name, keras_name):
     stride_shape = params['strides']
 
     pads = params['pads'] if 'pads' in params else [0, 0, 0, 0, 0, 0]
-    # padding_h, padding_w, _, _ = pads
-
     pad = 'valid'
 
     if all([shape % 2 == 1 for shape in kernel_shape]) and \
@@ -34,16 +33,25 @@ def convert_maxpool(node, params, layers, node_name, keras_name):
         logger.warning('Unable to use `same` padding. Add ZeroPadding2D layer to fix shapes.')
         padding_name = keras_name + '_pad'
         if len(kernel_shape) == 2:
-            padding_layer = keras.layers.ZeroPadding2D(
-                padding=pads[:len(stride_shape)],
-                name=padding_name
-            )
-        else: # 3D padding
+            padding = None
+
+            if len(pads) == 2 and (pads[0] > 0 or pads[1] > 0):
+                padding = (pads[0], pads[1])
+            elif len(pads) == 4 and (pads[0] > 0 or pads[1] > 0 or pads[2] > 0 or pads[3] > 0):
+                padding = ((pads[0], pads[2]), (pads[1], pads[3]))
+
+            if padding is not None:
+                padding_layer = keras.layers.ZeroPadding2D(
+                    padding=padding,
+                    name=padding_name
+                )
+                layers[padding_name] = input_0 = padding_layer(input_0)
+        else:  # 3D padding
             padding_layer = keras.layers.ZeroPadding3D(
                 padding=pads[:len(stride_shape)],
                 name=padding_name
             )
-        layers[padding_name] = input_0 = padding_layer(input_0)
+            layers[padding_name] = input_0 = padding_layer(input_0)
     if len(kernel_shape) == 2:
         pooling = keras.layers.MaxPooling2D(
             pool_size=kernel_shape,
@@ -64,12 +72,13 @@ def convert_maxpool(node, params, layers, node_name, keras_name):
     layers[node_name] = pooling(input_0)
 
 
-def convert_avgpool(node, params, layers, node_name, keras_name):
+def convert_avgpool(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert AvgPooling layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -82,8 +91,6 @@ def convert_avgpool(node, params, layers, node_name, keras_name):
     stride_shape = params['strides']
 
     pads = params['pads'] if 'pads' in params else [0, 0, 0, 0, 0, 0]
-    # padding_h, padding_w, _, _ = pads
-
     pad = 'valid'
 
     if all([shape % 2 == 1 for shape in kernel_shape]) and \
@@ -99,7 +106,7 @@ def convert_avgpool(node, params, layers, node_name, keras_name):
                 padding=pads[:len(stride_shape)],
                 name=padding_name
             )
-        else: # 3D padding
+        else:  # 3D padding
             padding_layer = keras.layers.ZeroPadding3D(
                 padding=pads[:len(stride_shape)],
                 name=padding_name
@@ -124,12 +131,13 @@ def convert_avgpool(node, params, layers, node_name, keras_name):
     layers[node_name] = pooling(input_0)
 
 
-def convert_global_avg_pool(node, params, layers, node_name, keras_name):
+def convert_global_avg_pool(node, params, layers, lambda_func, custom_objects, node_name, keras_name):
     """
     Convert GlobalAvgPool layer
     :param node: current operation node
     :param params: operation attributes
     :param layers: available keras layers
+    :param lambda_func: function for keras Lambda layer
     :param node_name: internal converter name
     :param keras_name: resulting layer name
     :return: None
@@ -150,3 +158,5 @@ def convert_global_avg_pool(node, params, layers, node_name, keras_name):
     lambda_layer2 = keras.layers.Lambda(target_layer, name=keras_name + '_EXPAND2')
     input_0 = lambda_layer1(input_0)  # double expand dims
     layers[node_name] = lambda_layer2(input_0)
+    lambda_func[keras_name + '_EXPAND1'] = target_layer
+    lambda_func[keras_name + '_EXPAND2'] = target_layer

@@ -4,13 +4,11 @@ The ONNX to keras converter module
 
 from tensorflow import keras
 import logging
+import inspect
 from onnx import numpy_helper
 
 from .layers import AVAILABLE_CONVERTERS
-
-
-# Use channels first format by default.
-keras.backend.set_image_data_format('channels_first')
+from .upsampling_layers import Resample
 
 
 def onnx_node_attributes_to_dict(args):
@@ -38,6 +36,41 @@ def onnx_node_attributes_to_dict(args):
     return {arg.name: onnx_attribute_to_dict(arg) for arg in args}
 
 
+def fuse_pad_conv(model_config):
+    """
+    Finds all ZeroPadding2D-Conv sequences and fuses them
+    :param model_config: Keras-model config dict
+    :return: modified config dict
+    """
+    model_config = dict(model_config)
+    layers = {cfg["name"]: cfg for cfg in model_config["layers"]}
+    CONV_LAYERS = {"Conv2D", "DepthwiseConv2D"}
+    
+    for name, layer in dict(layers).items():
+        if layer["class_name"] in CONV_LAYERS:
+            conv = layer
+            kernel_height, kernel_width = conv["config"]["kernel_size"]
+            stride_x, stride_y = conv["config"]["strides"]
+            inbound_node = conv["inbound_nodes"][0][0][0]
+            conv_input = layers[inbound_node]
+            if conv_input["class_name"] == "ZeroPadding2D":
+                pad = conv_input
+                (pad_top, pad_bottom), (pad_left, pad_right) = pad["config"]["padding"]
+                condition = (pad_top == pad_bottom) and (pad_left == pad_right) and \
+                            (kernel_height % 2) and (kernel_width % 2) and \
+                            (stride_x == 1) and (stride_y == 1) and \
+                            (pad_top == kernel_height // 2) and (pad_left == kernel_width // 2)
+                if condition:
+                    conv["config"]["padding"] = "same"
+                    conv["inbound_nodes"] = pad["inbound_nodes"]
+                    pad["inbound_nodes"] = []
+                    layers[conv["name"]] = conv
+                    del layers[pad["name"]]
+                    
+    model_config["layers"] = list(layers.values())
+    return model_config
+
+
 def onnx_to_keras(onnx_model, input_names,
                   input_shapes=None, name_policy=None, verbose=True, change_ordering=False):
     """
@@ -50,6 +83,10 @@ def onnx_to_keras(onnx_model, input_names,
     :param change_ordering: change ordering to HWC (experimental)
     :return: Keras model
     """
+    # Use channels first format by default.
+    keras_fmt = keras.backend.image_data_format()
+    keras.backend.set_image_data_format('channels_first')
+
     if verbose:
         logging.basicConfig(level=logging.DEBUG)
 
@@ -86,11 +123,13 @@ def onnx_to_keras(onnx_model, input_names,
             onnx_extracted_weights_name = onnx_w.ListFields()[3][1]
             weights[onnx_extracted_weights_name] = numpy_helper.to_array(onnx_w)
 
-        logger.debug('Found lalalalal weight {0} with shape {1}.'.format(
+        logger.debug('Found weight {0} with shape {1}.'.format(
                      onnx_extracted_weights_name,
                      weights[onnx_extracted_weights_name].shape))
-#    print(weights)
+
     layers = dict()
+    lambda_funcs = dict()
+    custom_objects = dict()
     keras_outputs = []
     keras_inputs = []
 
@@ -121,8 +160,6 @@ def onnx_to_keras(onnx_model, input_names,
         node_params['name_policy'] = name_policy
 
         node_name = str(node.output[0])
-        print (node_type)
-        print(node_name)
         keras_names = []
         for output_index, output in enumerate(node.output):
             if name_policy == 'short':
@@ -168,12 +205,27 @@ def onnx_to_keras(onnx_model, input_names,
                     layers[node_input] = weights[node_input]
                 else:
                     raise AttributeError('Current node is not in weights / model inputs / layers.')
-        #else:
-         #   logger.debug('... found all, continue')
+        else:
+            logger.debug('... found all, continue')
 
-        AVAILABLE_CONVERTERS[node_type](node, node_params, layers, node_name, keras_names)
-        print('used converter once')
-    print('finished layers')
+        keras.backend.set_image_data_format('channels_first')
+        AVAILABLE_CONVERTERS[node_type](
+            node,
+            node_params,
+            layers,
+            lambda_funcs,
+            custom_objects,
+            node_name,
+            keras_names
+        )
+        if isinstance(keras_names, list):
+            keras_names = keras_names[0]
+
+        try:
+            logger.debug('Output TF Layer -> ' + str(layers[keras_names]))
+        except KeyError:
+            pass
+
     # Check for terminal nodes
     for layer in onnx_outputs:
         if layer in layers:
@@ -181,12 +233,19 @@ def onnx_to_keras(onnx_model, input_names,
 
     # Create model
     model = keras.models.Model(inputs=keras_inputs, outputs=keras_outputs)
-
+    conf = model.get_config()
+    
+    # graph modifiers
+    conf = fuse_pad_conv(conf)
+    
     if change_ordering:
         import numpy as np
-        conf = model.get_config()
 
         for layer in conf['layers']:
+            if layer['config'] and 'shared_axes' in layer['config']:
+                # TODO: check axes first (if it's not 4D tensor)
+                layer['config']['shared_axes'] = [1, 2]
+
             if layer['config'] and 'batch_input_shape' in layer['config']:
                 layer['config']['batch_input_shape'] = \
                     tuple(np.reshape(np.array(
@@ -200,41 +259,71 @@ def onnx_to_keras(onnx_model, input_names,
                 if len(list(layer['config']['target_shape'][1:][:])) > 0:
                     layer['config']['target_shape'] = \
                         tuple(np.reshape(np.array(
-                            [
-                                list(layer['config']['target_shape'][1:][:]),
-                                layer['config']['target_shape'][0]
-                            ]), -1
-                        ), )
+                                list(layer['config']['target_shape'][1:]) +
+                                [layer['config']['target_shape'][0]]
+                            ), -1),)
 
             if layer['config'] and 'data_format' in layer['config']:
                 layer['config']['data_format'] = 'channels_last'
             if layer['config'] and 'axis' in layer['config']:
-                layer['config']['axis'] = 3
+                axis = layer['config']['axis']
+                swap = {1: 3, 3: 1}
+                if isinstance(axis, int):
+                    layer['config']['axis'] = swap[axis]
+                elif len(axis) == 1:
+                    layer['config']['axis'][0] = swap[axis[0]]
+#                 if layer['config']['axis'] == 3:
+#                     layer['config']['axis'] = 1
+#                 if layer['config']['axis'] == 1:
+#                     layer['config']['axis'] = 3
 
         for layer in conf['layers']:
             if 'function' in layer['config'] and layer['config']['function'][1] is not None:
-                f = list(layer['config']['function'])
-                try:
-                    if len(layer['config']['function'][1][0].shape) == 4:
-                        f[1] = (np.transpose(layer['config']['function'][1][0], [0, 2, 3, 1]), f[1][1])
-                    elif len(layer['config']['function'][1][0].shape) == 3:
-                        f[1] = (np.transpose(layer['config']['function'][1][0], [0, 2, 1]), f[1][1])
-                except Exception as e:
-                    logger.warning('Error occured in basic change ordering mode. Use fallback.')
+                kerasf = list(layer['config']['function'])
+                dargs = list(kerasf[1])
+                func = lambda_funcs.get(layer['name'])
+                if func:
+                    if len(dargs) > 1:
+                        params = inspect.signature(func).parameters
+                        i = list(params.keys()).index('axes') if ('axes' in params) else -1
 
-                    axes = np.array(layer['config']['function'][1][0])
-                    axes_map = np.array([0, 3, 1, 2])
-                    axes = axes_map[axes]
-                    f[1] = (axes, f[1][1])
+                        if i > 0:
+                            i -= 1
+                            axes = list(range(len(dargs[i].shape)))
+                            axes = axes[0:1] + axes[2:] + axes[1:2]
+                            dargs[i] = np.transpose(dargs[i], axes)
 
-                layer['config']['function'] = tuple(f)
+                        i = list(params.keys()).index('axis') if ('axis' in params) else -1
+
+                        if i > 0:
+                            i -= 1
+                            axis = np.array(dargs[i])
+                            axes_map = np.array([0, 3, 1, 2])
+                            dargs[i] = axes_map[axis]
+                    else:
+                        if dargs[0] == -1:
+                            dargs = [1]
+                        elif dargs[0] == 3:
+                            dargs = [1]
+                        elif len(dargs[0]) == 4:
+                            dargs[0] = [dargs[0][0], dargs[0][2], dargs[0][3], dargs[0][1]]
+
+                kerasf[1] = tuple(dargs)
+                layer['config']['function'] = tuple(kerasf)
 
         keras.backend.set_image_data_format('channels_last')
-        model_tf_ordering = keras.models.Model.from_config(conf)
+        model_tf_ordering = keras.models.Model.from_config(conf, custom_objects=dict(Resample=Resample))
 
-        for dst_layer, src_layer in zip(model_tf_ordering.layers, model.layers):
-            dst_layer.set_weights(src_layer.get_weights())
+        for dst_layer, conf in zip(model_tf_ordering.layers, conf['layers']):
+            src_layer = model.get_layer(dst_layer.name)
+            W = src_layer.get_weights()
+            # TODO: check axes first (if it's not 4D tensor)
+            if conf['config'] and 'shared_axes' in conf['config']:
+                W[0] = W[0].transpose(1, 2, 0)
+            dst_layer.set_weights(W)
 
         model = model_tf_ordering
 
-    return model
+    keras.backend.set_image_data_format(keras_fmt)
+
+    return model, custom_objects
