@@ -21,11 +21,11 @@ with open('README.md') as f:
 
 
 setup(name='onnx2keras',
-      version='0.0.18',
+      version='0.0.18r',
       description='The deep learning models convertor',
       long_description=long_description,
       long_description_content_type='text/markdown',
-      url='https://github.com/nerox8664/onnx2keras',
+      url='https://github.com/v-levochko/onnx2keras',
       author='Grigory Malivenko',
       author_email='nerox8664@gmail.com',
       classifiers=[
